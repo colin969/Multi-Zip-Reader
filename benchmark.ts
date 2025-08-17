@@ -1,8 +1,9 @@
-import { FpArchiveDataManager } from "./src/MultiZipReader";
+import { FpArchiveDataManager } from './src/MultiZipReader';
+import { crc32 } from 'zlib';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const testDir = "G:\\Data\\Flashpoint\\Data\\ArchiveData\\Htdocs_6.zip";
+const testDir = "G:\\Data\\Flashpoint\\Data\\ArchiveData";
 const testUncompressedDir = "G:\\Data\\Flashpoint\\Data\\ArchiveData\\Uncompressed";
 
 async function benchmarkZipParse(iterations: number): Promise<number> {
@@ -17,77 +18,6 @@ async function benchmarkZipParse(iterations: number): Promise<number> {
   return end - start;
 }
 
-async function readFromDisk(archive: FpArchiveDataManager) {
-  console.log('Reading all files from disk...');
-  console.log('=== Reading from Disk ===');
-  let readData = 0;
-  const names = Object.keys(archive.data);
-  const startReadUncompressed = performance.now();
-
-  for (const key of names) {
-    const filePath = path.join(testUncompressedDir, key);
-    const stream = fs.createReadStream(filePath);
-    // Read stream into memory as buffer
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-      readData += chunk.length;
-    }
-    const fileContent = Buffer.concat(chunks);
-
-    stream.destroy();
-  }
-
-  const endReadUncompressed = performance.now();
-
-  const uncompressedTimeMs = endReadUncompressed - startReadUncompressed;
-  const uncompressedTimeSec = uncompressedTimeMs / 1000;
-  const uncompressedReadMB = readData / (1024 * 1024);
-  const uncompressedMbPerSec = uncompressedReadMB / (uncompressedTimeSec);
-  console.log(`Read ${names.length} files in ${uncompressedTimeMs.toFixed(0)}ms (${(names.length / uncompressedTimeSec).toFixed(2)} Files/sec, ${uncompressedReadMB.toFixed(0)} MB at ${uncompressedMbPerSec.toFixed(2)} MB/s)`)
-
-}
-
-async function readFromZip(archive: FpArchiveDataManager) {
-  console.log('Reading all files from zip offsets...');
-  console.log('=== Reading from Zip Offset ===');
-  let readData = 0;
-  const names = Object.keys(archive.data);
-  const startRead = performance.now();
-
-  for (const key of names) {
-    const stream = await archive.readFile(key);
-    if (stream) {
-      if (stream.length === 0) {
-        // 0 size file, no data to read
-        continue;
-      }
-      // Read stream into memory as buffer
-      const chunks: Buffer[] = [];
-      for await (const chunk of stream) {
-        chunks.push(chunk);
-        readData += chunk.length;
-      }
-      const fileContent = Buffer.concat(chunks);
-      if (fileContent.length !== stream.length) {
-        throw new Error(`Failed read len found ${fileContent.length} - expected ${stream.length}`);
-      }
-
-      stream.close();
-    } else {
-      throw new Error('Failed read');
-    }
-  }
-  const endRead = performance.now();
-
-  const timeMs = endRead - startRead;
-  const timeSec = timeMs / 1000;
-  const readMB = readData / (1024 * 1024);
-  const mbPerSec = readMB / (timeSec);
-
-  console.log(`Read ${names.length} files in ${timeMs.toFixed(0)}ms (${(names.length / timeSec).toFixed(2)} Files/sec, ${readMB.toFixed(0)} MB at ${mbPerSec.toFixed(2)} MB/s)`)
-}
-
 async function benchmarkZipRead(): Promise<void> {
   const archive = new FpArchiveDataManager();
   const start = performance.now();
@@ -98,12 +28,57 @@ async function benchmarkZipRead(): Promise<void> {
   const timeMs = end - start;
 
   // Calculate average index time
-  const indexTotal = Object.keys(archive.data).length;
+  let indexTotal = 0;
+  for (const source of archive.sources) {
+    indexTotal += Object.keys(source.data).length;
+  }
   const filesPerSecond = indexTotal / timeMs;
-  console.log(`Indexed ${indexTotal.toLocaleString()} Files in ${(timeMs / 1000).toFixed(0)} seconds (${filesPerSecond.toFixed(0)} Files/sec)`)
+  console.log(`Indexed ${indexTotal.toLocaleString()} Files in ${timeMs.toFixed(0)}ms (${filesPerSecond.toFixed(0)} Files/sec)`)
+}
 
-  // await readFromDisk(archive);
-  // await readFromZip(archive);
+async function testZipRead(): Promise<void> {
+  const archive = new FpArchiveDataManager();
+  for (const file of fs.readdirSync(testDir, { withFileTypes: true }).filter(f => f.isFile() && f.name.endsWith('.zip'))) {
+    await archive.loadArchive(path.join(testDir, file.name), false);
+  }
+  const names = Object.keys(archive.sources[0]!.data);
+
+  for (let i = 0; i < 100; i++) {
+    // Verify 100 random files
+    const randIdx = Math.floor(Math.random() * names.length);
+    const name = names[randIdx] as string;
+    const file = archive.sources[0]!.data[name];
+    const stream = await archive.readFile(name);
+    if (stream !== null && file !== undefined) {
+      const hash = await new Promise<number>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        
+        stream.on('data', (chunk) => {
+          if (typeof chunk === 'string') {
+            chunks.push(Buffer.from(chunk));
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        
+        stream.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          if (buffer.length !== file.length) {
+            throw new Error('Did not read whole length');
+          }
+          const hash = crc32(buffer);
+          resolve(hash >>> 0); // Convert to unsigned 32-bit
+        });
+        
+        stream.on('error', reject); 
+      });
+      if (hash !== file.crc32) {
+        throw new Error(`Bad hash: Expected ${file.crc32.toString(16).toUpperCase()}, Got ${hash.toString(16).toUpperCase()}`);
+      }
+    } else {
+      throw new Error('File missing?');
+    }
+  }
 }
 
 async function run() {

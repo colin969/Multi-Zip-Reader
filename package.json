@@ -1,13 +1,16 @@
 {
-  "name": "multi-zip-reader",
-  "version": "1.0.0",
+  "name": "@fparchive/multi-zip-reader",
+  "version": "1.0.4",
   "description": "",
   "license": "MIT",
   "author": "Colin969",
   "type": "commonjs",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
     "benchmark": "ts-node benchmark.ts"
   },
   "devDependencies": {
